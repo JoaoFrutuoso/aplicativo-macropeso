@@ -1,82 +1,86 @@
+import { useState } from "react";
+import { createClient } from "@supabase/supabase-js";
+import MacroPesoApp from "./components/MacroPesoApp";
 
-import React, { useState, useEffect } from 'react';
-import { Helmet } from 'react-helmet';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { ShieldAlert, CheckCircle2 } from 'lucide-react';
-import MacroPesoApp from '@/components/MacroPesoApp';
-import ScrollToTop from '@/components/ScrollToTop';
-import { Toaster } from '@/components/ui/toaster';
-import { validateFoodDatabase } from '@/utils/validateFoodDatabase';
+// 🔑 Supabase
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
-const App = () => {
-  const [dbValidation, setDbValidation] = useState({ isValid: true, errors: [], summary: { total: 0, valid: 0, invalid: 0 } });
-  const [showValidationSuccess, setShowValidationSuccess] = useState(false);
+export default function App() {
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [liberado, setLiberado] = useState(false);
+  const [erro, setErro] = useState("");
 
-  useEffect(() => {
-    const validation = validateFoodDatabase();
-    setDbValidation(validation);
-    
-    if (!validation.isValid) {
-      console.error('⛔ FATAL DATABASE ERROR:', validation.errors);
-    } else {
-      setShowValidationSuccess(true);
-      setTimeout(() => setShowValidationSuccess(false), 5000);
+  async function verificarAcesso() {
+    setLoading(true);
+    setErro("");
+
+    const { data, error } = await supabase
+      .from("acessos_kiwify")
+      .select("email")
+      .eq("email", email)
+      .eq("ativo", true)
+      .maybeSingle();
+
+    if (error || !data) {
+      setErro("Acesso não autorizado para este email.");
+      setLoading(false);
+      return;
     }
-  }, []);
 
-  if (!dbValidation.isValid) {
-     return (
-        <div className="fixed inset-0 z-50 bg-gray-900/95 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full p-8 border-l-8 border-red-600 m-4">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="bg-red-100 p-3 rounded-full">
-                <ShieldAlert className="w-10 h-10 text-red-600" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">Violação de Integridade de Dados</h1>
-                <p className="text-red-600 font-medium">O sistema foi bloqueado por segurança nutricional.</p>
-              </div>
-            </div>
-            <div className="bg-red-50 p-4 rounded-lg border border-red-100 max-h-60 overflow-y-auto mb-6">
-               <ul className="list-disc pl-5 space-y-1">
-                  {dbValidation.errors.map((err, idx) => (
-                    <li key={idx} className="text-sm text-red-700 font-mono">{err}</li>
-                  ))}
-               </ul>
-            </div>
-          </div>
-        </div>
-     );
+    setLiberado(true);
+    setLoading(false);
   }
 
-  return (
-    <>
-      <Helmet>
-        <title>MacroPeso Calculator - Calculadora Nutricional Profissional</title>
-      </Helmet>
+  // 🔒 BLOQUEIO
+  if (!liberado) {
+    return (
+      <div style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#0f172a",
+        color: "#fff",
+        flexDirection: "column",
+        gap: "12px"
+      }}>
+        <h2>🔐 Acesso restrito</h2>
 
-      {showValidationSuccess && (
-        <div className="fixed top-4 right-4 z-50 animate-in slide-in-from-right fade-in duration-500">
-           <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg shadow-lg flex items-center gap-3">
-              <CheckCircle2 className="w-5 h-5 text-green-600" />
-              <div>
-                <p className="font-bold text-sm">Integridade de Dados Verificada</p>
-                <p className="text-xs text-green-700">{dbValidation.summary.total} itens validados.</p>
-              </div>
-           </div>
-        </div>
-      )}
+        <input
+          type="email"
+          placeholder="Digite seu email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={{
+            padding: "10px",
+            width: "260px",
+            borderRadius: "6px",
+            border: "none"
+          }}
+        />
 
-      <Router>
-        <ScrollToTop />
-        <Routes>
-          <Route path="/" element={<MacroPesoApp isDbValid={dbValidation.isValid} />} />
-          <Route path="*" element={<Navigate to="/" />} />
-        </Routes>
-      </Router>
-      <Toaster />
-    </>
-  );
-};
+        <button
+          onClick={verificarAcesso}
+          disabled={loading}
+          style={{
+            padding: "10px 20px",
+            borderRadius: "6px",
+            border: "none",
+            cursor: "pointer"
+          }}
+        >
+          {loading ? "Verificando..." : "Entrar"}
+        </button>
 
-export default App;
+        {erro && <p style={{ color: "#f87171" }}>{erro}</p>}
+      </div>
+    );
+  }
+
+  // ✅ LIBERADO
+  return <MacroPesoApp />;
+}
