@@ -11,7 +11,7 @@ export default function App() {
   const supabase = useMemo(() => {
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
     return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  }, []);
+  }, [SUPABASE_URL, SUPABASE_ANON_KEY]);
 
   const [loading, setLoading] = useState(true);
 
@@ -92,7 +92,6 @@ export default function App() {
         return;
       }
 
-      // Expiração (12 meses)
       const exp = data.expires_at ? new Date(data.expires_at) : null;
       setExpiresAt(exp ? exp.toISOString() : null);
 
@@ -119,19 +118,34 @@ export default function App() {
 
   const sendLoginLink = async () => {
     if (!supabase) return alert("Supabase não configurado (VITE_...).");
+
     const userEmail = email.toLowerCase().trim();
     if (!userEmail.includes("@")) return alert("Digite um e-mail válido.");
 
-    const { error } = await supabase.auth.signInWithOtp({
-      email: userEmail,
-      options: {
-        // Quando tiver domínio, configure:
-        // emailRedirectTo: "https://SEU-DOMINIO.com"
-      },
-    });
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email: userEmail,
+        options: {
+          // ✅ ISSO AQUI É O QUE VOCÊ PEDIU:
+          emailRedirectTo: window.location.origin,
+          // Se quiser fixo, troque por:
+          // emailRedirectTo: "https://peachpuff-dog-509725.hostingersite.com",
+        },
+      });
 
-    if (error) return alert("Erro ao enviar link: " + error.message);
-    alert("Te enviei um link/código no e-mail. Abra para entrar.");
+      if (error) return alert("Erro ao enviar link: " + error.message);
+      alert("Te enviei um link/código no e-mail. Abra para entrar.");
+    } catch (e) {
+      // Isso pega o "Failed to fetch" (rede/cors/extensão bloqueando)
+      alert(
+        "Erro ao enviar link: Failed to fetch.\n\n" +
+          "Causas comuns:\n" +
+          "1) SUPABASE_URL errado\n" +
+          "2) Bloqueio por extensão/antivírus\n" +
+          "3) Domínio não liberado no Supabase Auth (Redirect URLs)\n\n" +
+          "Depois do Deploy, se continuar, a gente ajusta o Supabase Auth."
+      );
+    }
   };
 
   const logout = async () => {
@@ -192,7 +206,7 @@ export default function App() {
     );
   }
 
-  // 3) Logado, mas bloqueado (não pagou / expirou / etc.)
+  // 3) Logado, mas bloqueado
   if (isAllowed === false) {
     return (
       <Page>
@@ -208,7 +222,7 @@ export default function App() {
     );
   }
 
-  // 4) Logado e autorizado → mostra a Balança
+  // 4) Logado e autorizado → app
   return (
     <Page>
       <TopBar email={session.user.email} expiresAt={expiresAt} onLogout={logout} />
@@ -290,7 +304,6 @@ function Page({ children }) {
 
 function formatBR(isoOrDate) {
   const d = new Date(isoOrDate);
-  // dd/mm/aaaa
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const yyyy = d.getFullYear();
