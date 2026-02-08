@@ -1,249 +1,341 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
-import MacroPesoApp from "@/components/MacroPesoApp";
-import { supabase } from "@/supabaseClient";
+import { useEffect, useMemo, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
-const STORAGE_KEY = "macropeso_auth_email_v1";
+// ✅ Configure no .env e na Hostinger (Variáveis de ambiente):
+// VITE_SUPABASE_URL=...
+// VITE_SUPABASE_ANON_KEY=...
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-function normalizeEmail(email) {
-  return (email || "").trim().toLowerCase();
-}
-
-function isExpired(dateStr) {
-  if (!dateStr) return false; // sem expiração = válido
-  const exp = new Date(dateStr).getTime();
-  if (Number.isNaN(exp)) return true;
-  return exp < Date.now();
-}
-
-function AccessGate({ children }) {
-  const [email, setEmail] = useState("");
-  const [savedEmail, setSavedEmail] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [checkingSaved, setCheckingSaved] = useState(true);
-  const [error, setError] = useState("");
-
-  // tenta auto-logar se tiver email salvo
-  useEffect(() => {
-    const fromStorage = normalizeEmail(localStorage.getItem(STORAGE_KEY));
-    if (fromStorage) setSavedEmail(fromStorage);
-    setCheckingSaved(false);
+export default function App() {
+  const supabase = useMemo(() => {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+    return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   }, []);
 
-  async function checkAccess(targetEmail) {
-    const e = normalizeEmail(targetEmail);
-    if (!e.includes("@")) {
-      throw new Error("Digite um e-mail válido.");
-    }
+  const [loading, setLoading] = useState(true);
 
-    // Busca no Supabase
-    const { data, error: supaErr } = await supabase
-      .from("acessos_kiwify")
-      .select("ativo, data_expiracao")
-      .eq("email", e)
-      .maybeSingle();
+  // Auth
+  const [email, setEmail] = useState("");
+  const [session, setSession] = useState(null);
 
-    if (supaErr) {
-      // erro de permissão / RLS / etc
-      throw new Error("Erro ao consultar acesso no Supabase. Verifique RLS/policies e permissões.");
-    }
+  // Gate (Kiwify + Expiração)
+  const [isAllowed, setIsAllowed] = useState(null); // null = checando, true/false
+  const [gateTitle, setGateTitle] = useState("");
+  const [gateError, setGateError] = useState("");
+  const [expiresAt, setExpiresAt] = useState(null);
 
-    if (!data) {
-      throw new Error("E-mail não encontrado como comprador.");
-    }
+  // App (telas)
+  const [screen, setScreen] = useState("home");
 
-    if (data.ativo !== true) {
-      throw new Error("Acesso inativo para este e-mail.");
-    }
-
-    if (isExpired(data.data_expiracao)) {
-      throw new Error("Acesso expirado para este e-mail.");
-    }
-
-    return true;
-  }
-
-  // auto-check do email salvo
   useEffect(() => {
-    let cancelled = false;
-
-    async function run() {
-      if (!savedEmail) return;
-      try {
-        setLoading(true);
-        setError("");
-        await checkAccess(savedEmail);
-        if (cancelled) return;
-        localStorage.setItem(STORAGE_KEY, savedEmail);
-        setEmail(savedEmail);
-      } catch (err) {
-        if (cancelled) return;
-        localStorage.removeItem(STORAGE_KEY);
-        setSavedEmail("");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+    if (!supabase) {
+      setLoading(false);
+      return;
     }
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data?.session ?? null);
+      setLoading(false);
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      setIsAllowed(null);
+      setGateTitle("");
+      setGateError("");
+      setExpiresAt(null);
+    });
+
+    return () => sub.subscription?.unsubscribe();
+  }, [supabase]);
+
+  // ✅ Depois de logar: checar se o e-mail está autorizado + se NÃO expirou
+  useEffect(() => {
+    if (!supabase) return;
+    if (!session?.user?.email) return;
+
+    const run = async () => {
+      setIsAllowed(null);
+      setGateTitle("");
+      setGateError("");
+      setExpiresAt(null);
+
+      const userEmail = session.user.email.toLowerCase().trim();
+
+      // TABELA NO SUPABASE:
+      // entitlements: email (unique), status ('active'), provider ('kiwify'), expires_at (timestamptz)
+      const { data, error } = await supabase
+        .from("entitlements")
+        .select("email,status,expires_at")
+        .eq("email", userEmail)
+        .maybeSingle();
+
+      if (error) {
+        setIsAllowed(false);
+        setGateTitle("Erro ao validar acesso");
+        setGateError("Não consegui validar seu acesso agora. Tente novamente.");
+        return;
+      }
+
+      if (!data) {
+        setIsAllowed(false);
+        setGateTitle("Acesso não liberado");
+        setGateError("Pagamento não encontrado para este e-mail.");
+        return;
+      }
+
+      if ((data.status || "").toLowerCase() !== "active") {
+        setIsAllowed(false);
+        setGateTitle("Acesso bloqueado");
+        setGateError("Seu acesso está inativo. Fale com o suporte.");
+        return;
+      }
+
+      // Expiração (12 meses)
+      const exp = data.expires_at ? new Date(data.expires_at) : null;
+      setExpiresAt(exp ? exp.toISOString() : null);
+
+      if (!exp) {
+        setIsAllowed(false);
+        setGateTitle("Acesso inválido");
+        setGateError("Registro sem validade (expires_at). Precisa corrigir no banco.");
+        return;
+      }
+
+      const now = new Date();
+      if (exp.getTime() <= now.getTime()) {
+        setIsAllowed(false);
+        setGateTitle("Acesso expirado");
+        setGateError("Seu acesso de 12 meses expirou. Renove para continuar usando.");
+        return;
+      }
+
+      setIsAllowed(true);
+    };
 
     run();
-    return () => { cancelled = true; };
-  }, [savedEmail]);
+  }, [supabase, session]);
 
-  const isAuthed = useMemo(() => {
-    const stored = normalizeEmail(localStorage.getItem(STORAGE_KEY));
-    return stored && stored === normalizeEmail(email);
-  }, [email]);
+  const sendLoginLink = async () => {
+    if (!supabase) return alert("Supabase não configurado (VITE_...).");
+    const userEmail = email.toLowerCase().trim();
+    if (!userEmail.includes("@")) return alert("Digite um e-mail válido.");
 
-  async function onSubmit(e) {
-    e.preventDefault();
-    try {
-      setLoading(true);
-      setError("");
-      const e2 = normalizeEmail(email);
-      await checkAccess(e2);
-      localStorage.setItem(STORAGE_KEY, e2);
-      setEmail(e2);
-    } catch (err) {
-      setError(err?.message || "Erro ao validar e-mail.");
-    } finally {
-      setLoading(false);
-    }
-  }
+    const { error } = await supabase.auth.signInWithOtp({
+      email: userEmail,
+      options: {
+        // Quando tiver domínio, configure:
+        // emailRedirectTo: "https://SEU-DOMINIO.com"
+      },
+    });
 
-  function sair() {
-    localStorage.removeItem(STORAGE_KEY);
-    setEmail("");
-    setSavedEmail("");
-    setError("");
-  }
+    if (error) return alert("Erro ao enviar link: " + error.message);
+    alert("Te enviei um link/código no e-mail. Abra para entrar.");
+  };
 
-  if (checkingSaved || loading) {
+  const logout = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setScreen("home");
+  };
+
+  // ---------------- UI ----------------
+
+  if (loading) return <Page><p>Carregando...</p></Page>;
+
+  if (!supabase) {
     return (
-      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, fontFamily: "system-ui" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Carregando...</div>
-          <div style={{ opacity: 0.7 }}>Validando acesso</div>
-        </div>
-      </div>
+      <Page>
+        <h1>Balança (MacroPeso)</h1>
+        <p style={{ color: "#b91c1c" }}>
+          Falta configurar VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.
+        </p>
+      </Page>
     );
   }
 
-  if (!isAuthed) {
+  // 1) NÃO logado → login por e-mail
+  if (!session) {
     return (
-      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, fontFamily: "system-ui" }}>
-        <div style={{
-          width: "100%",
-          maxWidth: 420,
-          border: "1px solid rgba(0,0,0,0.12)",
-          borderRadius: 16,
-          padding: 20,
-          boxShadow: "0 10px 30px rgba(0,0,0,0.08)"
-        }}>
-          <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>Acesso MacroPeso</div>
-          <div style={{ opacity: 0.7, marginBottom: 16 }}>Digite o e-mail usado na compra</div>
+      <Page>
+        <h1>Balança (MacroPeso)</h1>
+        <p>Entre com seu e-mail para acessar.</p>
 
-          <form onSubmit={onSubmit}>
-            <input
-              value={email}
-              onChange={(ev) => setEmail(ev.target.value)}
-              placeholder="seuemail@dominio.com"
-              autoComplete="email"
-              style={{
-                width: "100%",
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "1px solid rgba(0,0,0,0.18)",
-                outline: "none",
-                fontSize: 14
-              }}
-            />
+        <div style={card}>
+          <label style={label}>E-mail</label>
+          <input
+            style={input}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="seuemail@gmail.com"
+          />
+          <button style={btn} onClick={sendLoginLink}>
+            Enviar link de acesso
+          </button>
 
-            {error && (
-              <div style={{ marginTop: 12, color: "#b00020", fontSize: 13, fontWeight: 600 }}>
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              style={{
-                width: "100%",
-                marginTop: 14,
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "none",
-                background: "#0f766e",
-                color: "white",
-                fontWeight: 800,
-                cursor: "pointer",
-                fontSize: 14
-              }}
-            >
-              Entrar
-            </button>
-          </form>
-
-          <div style={{ marginTop: 14, fontSize: 12, opacity: 0.7 }}>
-            Se você acabou de comprar, aguarde a liberação do e-mail.
-          </div>
+          <p style={{ fontSize: 12, color: "#64748b", marginTop: 10 }}>
+            * Use o mesmo e-mail do pagamento na Kiwify. Acesso válido por 12 meses.
+          </p>
         </div>
-      </div>
+      </Page>
     );
   }
 
-  // autorizado
+  // 2) Logado, checando compra/validade
+  if (isAllowed === null) {
+    return (
+      <Page>
+        <TopBar email={session.user.email} expiresAt={expiresAt} onLogout={logout} />
+        <p>Validando seu pagamento e sua validade...</p>
+      </Page>
+    );
+  }
+
+  // 3) Logado, mas bloqueado (não pagou / expirou / etc.)
+  if (isAllowed === false) {
+    return (
+      <Page>
+        <TopBar email={session.user.email} expiresAt={expiresAt} onLogout={logout} />
+        <div style={card}>
+          <h2 style={{ marginTop: 0 }}>{gateTitle || "Acesso bloqueado"}</h2>
+          <p>{gateError || "Acesso não liberado."}</p>
+          <p style={{ fontSize: 12, color: "#64748b" }}>
+            Dica: confirme se entrou com o MESMO e-mail usado no checkout.
+          </p>
+        </div>
+      </Page>
+    );
+  }
+
+  // 4) Logado e autorizado → mostra a Balança
   return (
-    <div style={{ minHeight: "100vh" }}>
-      <div style={{
-        position: "sticky",
-        top: 0,
-        zIndex: 50,
-        background: "white",
-        borderBottom: "1px solid rgba(0,0,0,0.08)",
-        padding: "10px 14px",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        fontFamily: "system-ui"
-      }}>
-        <div style={{ fontSize: 12, opacity: 0.75 }}>
-          Logado como: <b>{normalizeEmail(localStorage.getItem(STORAGE_KEY))}</b>
-        </div>
-        <button
-          onClick={sair}
-          style={{
-            padding: "8px 10px",
-            borderRadius: 10,
-            border: "1px solid rgba(0,0,0,0.14)",
-            background: "white",
-            cursor: "pointer",
-            fontWeight: 700,
-            fontSize: 12
-          }}
-        >
-          Sair
-        </button>
-      </div>
+    <Page>
+      <TopBar email={session.user.email} expiresAt={expiresAt} onLogout={logout} />
 
+      {screen === "home" && (
+        <>
+          <h1>Balança Nutricional</h1>
+          <div style={{ display: "grid", gap: 12, maxWidth: 360 }}>
+            <button style={btn} onClick={() => setScreen("calculadora")}>
+              Calculadora (TACO)
+            </button>
+            <button style={btn} onClick={() => setScreen("substituicao")}>
+              Substituição (TACO)
+            </button>
+            <button style={btn2} onClick={() => setScreen("receita")}>
+              Modo Receita (Peso)
+            </button>
+          </div>
+        </>
+      )}
+
+      {screen === "calculadora" && (
+        <Section title="Calculadora (TACO)" onBack={() => setScreen("home")}>
+          <p>Macro↔Macro: pronto → cru, usando SOMENTE TACO.</p>
+        </Section>
+      )}
+
+      {screen === "substituicao" && (
+        <Section title="Substituição (TACO)" onBack={() => setScreen("home")}>
+          <p>Substituição mantendo macro dominante, usando SOMENTE TACO.</p>
+        </Section>
+      )}
+
+      {screen === "receita" && (
+        <Section title="Modo Receita (Peso)" onBack={() => setScreen("home")}>
+          <p>Peso↔Peso por rendimento e modo de cocção (cozido/assado/frito/grelhado/vapor).</p>
+        </Section>
+      )}
+    </Page>
+  );
+}
+
+// ---------------- Components/UI ----------------
+
+function TopBar({ email, expiresAt, onLogout }) {
+  const expText = expiresAt ? formatBR(expiresAt) : null;
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+      <div style={{ fontSize: 14, color: "#334155" }}>
+        Logado: <b>{email}</b>
+        {expText && (
+          <span style={{ marginLeft: 10, fontSize: 12, color: "#64748b" }}>
+            Validade: <b>{expText}</b>
+          </span>
+        )}
+      </div>
+      <button style={btnSmall} onClick={onLogout}>Sair</button>
+    </div>
+  );
+}
+
+function Section({ title, onBack, children }) {
+  return (
+    <div style={{ marginTop: 18 }}>
+      <button style={btnSmall} onClick={onBack}>← Voltar</button>
+      <h2>{title}</h2>
+      <div style={card}>{children}</div>
+    </div>
+  );
+}
+
+function Page({ children }) {
+  return (
+    <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 720, margin: "0 auto" }}>
       {children}
     </div>
   );
 }
 
-export default function App() {
-  return (
-    <Router>
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <AccessGate>
-              <MacroPesoApp />
-            </AccessGate>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
-    </Router>
-  );
+function formatBR(isoOrDate) {
+  const d = new Date(isoOrDate);
+  // dd/mm/aaaa
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 }
+
+const card = {
+  border: "1px solid #e2e8f0",
+  borderRadius: 12,
+  padding: 16,
+  maxWidth: 520,
+  background: "#fff",
+};
+
+const label = { display: "block", fontSize: 12, color: "#475569", marginBottom: 6 };
+
+const input = {
+  width: "100%",
+  padding: 10,
+  borderRadius: 10,
+  border: "1px solid #cbd5e1",
+  outline: "none",
+};
+
+const btn = {
+  marginTop: 12,
+  width: "100%",
+  padding: 12,
+  borderRadius: 10,
+  border: "none",
+  cursor: "pointer",
+  background: "#4f46e5",
+  color: "#fff",
+  fontWeight: 700,
+};
+
+const btn2 = {
+  ...btn,
+  background: "#0f172a",
+};
+
+const btnSmall = {
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid #cbd5e1",
+  cursor: "pointer",
+  background: "#fff",
+};
